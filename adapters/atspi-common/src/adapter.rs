@@ -620,11 +620,14 @@ impl Drop for Adapter {
 #[cfg(test)]
 mod tests {
     use super::Adapter;
-    use crate::{AdapterCallback, AppContext, CacheEvent, Event, InterfaceSet, WindowBounds};
+    use crate::{
+        AdapterCallback, AppContext, CacheEvent, Event, InterfaceSet, ObjectEvent, WindowBounds,
+    };
     use accesskit::{
         ActionHandler, ActionRequest, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate,
     };
     use accesskit_consumer::FullNodeId;
+    use atspi_common::State;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -635,6 +638,7 @@ mod tests {
 
     struct CapturingCallback {
         ops: Arc<Mutex<Vec<CacheOp>>>,
+        states: Arc<Mutex<Vec<(State, bool)>>>,
     }
 
     impl AdapterCallback for CapturingCallback {
@@ -645,6 +649,10 @@ mod tests {
             match event {
                 Event::Cache(CacheEvent::Added(id)) => ops.push(CacheOp::Added(id)),
                 Event::Cache(CacheEvent::Removed(id)) => ops.push(CacheOp::Removed(id)),
+                Event::Object {
+                    event: ObjectEvent::StateChanged(state, on),
+                    ..
+                } => self.states.lock().unwrap().push((state, on)),
                 _ => {}
             }
         }
@@ -662,17 +670,33 @@ mod tests {
     }
 
     fn build(initial: TreeUpdate) -> (Adapter, Arc<Mutex<Vec<CacheOp>>>) {
+        let (adapter, ops, _) = build_with_states(initial);
+        (adapter, ops)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn build_with_states(
+        initial: TreeUpdate,
+    ) -> (
+        Adapter,
+        Arc<Mutex<Vec<CacheOp>>>,
+        Arc<Mutex<Vec<(State, bool)>>>,
+    ) {
         let ops = Arc::new(Mutex::new(Vec::new()));
+        let states = Arc::new(Mutex::new(Vec::new()));
         let app_context = AppContext::new(None);
         let adapter = Adapter::new(
             &app_context,
-            CapturingCallback { ops: ops.clone() },
+            CapturingCallback {
+                ops: ops.clone(),
+                states: states.clone(),
+            },
             initial,
             false,
             WindowBounds::default(),
             NoOpActionHandler,
         );
-        (adapter, ops)
+        (adapter, ops, states)
     }
 
     fn initial_tree() -> TreeUpdate {
@@ -694,6 +718,58 @@ mod tests {
             tree_id: TreeId::ROOT,
             focus: NodeId(0),
         }
+    }
+
+    fn menu_button(expanded: Option<bool>) -> Node {
+        let mut node = Node::new(Role::Button);
+        if let Some(expanded) = expanded {
+            node.set_expanded(expanded);
+        }
+        node
+    }
+
+    fn button_state(adapter: &Adapter) -> atspi_common::StateSet {
+        let tree = adapter.context.read_tree();
+        let state = tree.state();
+        let node = state.root().children().next().unwrap();
+        crate::node::NodeWrapper(&node).state(false)
+    }
+
+    #[test]
+    fn expanded_maps_to_expandable_and_expanded() {
+        let tree = |expanded| TreeUpdate {
+            nodes: vec![
+                (NodeId(0), with_children(Role::Window, &[NodeId(1)])),
+                (NodeId(1), menu_button(expanded)),
+            ],
+            ..initial_tree()
+        };
+        let (adapter, _, _) = build_with_states(tree(None));
+        let s = button_state(&adapter);
+        assert!(!s.contains(State::Expandable) && !s.contains(State::Expanded));
+        let (adapter, _, _) = build_with_states(tree(Some(false)));
+        let s = button_state(&adapter);
+        assert!(s.contains(State::Expandable) && !s.contains(State::Expanded));
+        let (adapter, _, _) = build_with_states(tree(Some(true)));
+        let s = button_state(&adapter);
+        assert!(s.contains(State::Expandable) && s.contains(State::Expanded));
+    }
+
+    #[test]
+    fn expanding_emits_state_changed() {
+        let (mut adapter, _, states) = build_with_states(TreeUpdate {
+            nodes: vec![
+                (NodeId(0), with_children(Role::Window, &[NodeId(1)])),
+                (NodeId(1), menu_button(Some(false))),
+            ],
+            ..initial_tree()
+        });
+        states.lock().unwrap().clear();
+        adapter.update(update(vec![(NodeId(1), menu_button(Some(true)))]));
+        assert_eq!(*states.lock().unwrap(), vec![(State::Expanded, true)]);
+        states.lock().unwrap().clear();
+        adapter.update(update(vec![(NodeId(1), menu_button(Some(false)))]));
+        assert_eq!(*states.lock().unwrap(), vec![(State::Expanded, false)]);
     }
 
     #[test]

@@ -363,6 +363,15 @@ impl NodeWrapper<'_> {
             atspi_state.insert(State::Indeterminate);
         }
 
+        // Expanded state (cadatomic fork): a node with an expanded state is expandable, and
+        // expanded when it is `Some(true)`, as Chromium maps `aria-expanded` on Linux.
+        if let Some(expanded) = state.data().is_expanded() {
+            atspi_state.insert(State::Expandable);
+            if expanded {
+                atspi_state.insert(State::Expanded);
+            }
+        }
+
         // Toggled state
         match state.toggled() {
             Some(Toggled::Mixed) => atspi_state.insert(State::Indeterminate),
